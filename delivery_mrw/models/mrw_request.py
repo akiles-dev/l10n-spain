@@ -38,14 +38,14 @@ class MRWRequest:
     def __init__(self, carrier):
         self.carrier = carrier
         self.api_env = "prod" if self.carrier.prod_environment else "test"
-        self.client = Client(wsdl=MRW_API_URL[self.api_env])
+        self.history = HistoryPlugin(maxlen=10)
+        self.client = Client(wsdl=MRW_API_URL[self.api_env], plugins=[self.history])
         self.username = self.carrier.mrw_username
         self.pasword = self.carrier.mrw_password
         self.client_code = self.carrier.mrw_client_code
         self.department_code = self.carrier.mrw_department_code or ""
         self.franquicia_code = self.carrier.mrw_franquicia_code
         self._set_soapheaders()
-        self.history = HistoryPlugin(maxlen=10)
 
     def _set_soapheaders(self):
         credentials = self.client.get_element("ns0:AuthInfo")(
@@ -62,6 +62,9 @@ class MRWRequest:
             response = service(request=request)
         except Fault as e:
             raise UserError(str(e)) from e
+        finally:
+            # Log even on fault, so failed requests can be debugged too
+            self.carrier._mrw_log_request(self)
         return response
 
     def _cancel_shipment(self, reference=False):
@@ -99,9 +102,14 @@ class MRWRequest:
         """Get just tracking states from MRW info for the given reference"""
         transport = ZeepTransport(timeout=10)
         zeep_client = Client(
-            wsdl=MRW_TRACKING_API_URL[self.api_env], transport=transport
+            wsdl=MRW_TRACKING_API_URL[self.api_env],
+            transport=transport,
+            plugins=[self.history],
         )
-        response = zeep_client.service.GetEnvios(**vals)
+        try:
+            response = zeep_client.service.GetEnvios(**vals)
+        finally:
+            self.carrier._mrw_log_request(self)
         return response
 
     def _process_mrw_tracking_response(self, response):

@@ -182,26 +182,23 @@ class DeliveryCarrier(models.Model):
 
     @api.model
     def _mrw_log_request(self, mrw_request):
-        """Helper to write raw request/response to the current picking. If debug
-        is active in the carrier, those will be logged in the ir.logging as well"""
-        mrw_last_request = mrw_last_response = False
-        try:
-            mrw_last_request = etree.tostring(
-                mrw_request.history.last_sent["envelope"],
-                encoding="UTF-8",
-                pretty_print=True,
-            )
-            mrw_last_response = etree.tostring(
-                mrw_request.history.last_received["envelope"],
-                encoding="UTF-8",
-                pretty_print=True,
-            )
-        # Don't fail hard on this. Sometimes zeep could not be able to keep history
-        except Exception:
+        """Log the last raw SOAP request/response to ir.logging if debug is
+        active in the carrier. Request and response are logged independently
+        so a missing response (e.g. transport error) still logs the request."""
+        if not self.debug_logging:
             return
-        # Debug must be active in the carrier
-        self.log_xml(mrw_last_request, "mrw_request")
-        self.log_xml(mrw_last_response, "mrw_response")
+        for direction in ("last_sent", "last_received"):
+            # Don't fail hard on this. Sometimes zeep could not be able to
+            # keep history
+            try:
+                entry = getattr(mrw_request.history, direction)
+                envelope = etree.tostring(
+                    entry["envelope"], encoding="UTF-8", pretty_print=True
+                )
+            except Exception:
+                continue
+            func = "mrw_request" if direction == "last_sent" else "mrw_response"
+            self.log_xml(envelope, func)
 
     def _mrw_check_response(self, response):
         if not int(response["Estado"]):
@@ -389,7 +386,6 @@ class DeliveryCarrier(models.Model):
         response = mrw_request._send_shipping(vals)
         vals.update({"tracking_number": False, "exact_price": 0})
         response_message = self._mrw_check_response(response)
-        self._mrw_log_request(mrw_request)
         mrw_tracking_ref = response["NumeroEnvio"]
         vals["tracking_number"] = mrw_tracking_ref or ""
         label = self.mrw_get_label(mrw_tracking_ref, picking)
@@ -440,7 +436,6 @@ class DeliveryCarrier(models.Model):
             mrw_request = MRWRequest(self)
             response = mrw_request._cancel_shipment(picking.carrier_tracking_ref)
             self._mrw_check_response(response)
-            self._mrw_log_request(mrw_request)
         return True
 
     def _prepare_label(self, mrw_tracking_ref):
