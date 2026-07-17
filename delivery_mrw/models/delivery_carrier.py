@@ -192,9 +192,11 @@ class DeliveryCarrier(models.Model):
             # keep history
             try:
                 entry = getattr(mrw_request.history, direction)
+                # decode: log_xml stores it in a text column, and psycopg2
+                # can't adapt bytes (the error is silently swallowed there)
                 envelope = etree.tostring(
                     entry["envelope"], encoding="UTF-8", pretty_print=True
-                )
+                ).decode("utf-8")
             except Exception:
                 continue
             func = "mrw_request" if direction == "last_sent" else "mrw_response"
@@ -207,66 +209,101 @@ class DeliveryCarrier(models.Model):
             return response["Mensaje"]
         return ""
 
-    def remove_found_regex_from_string(self, regex, string):
-        limit_inf = regex.span()[0]
-        limit_sup = regex.span()[1]
-        string = string[:limit_inf] + string[limit_sup:]
-        regex = "0" if regex[0] in ("S/N", "s/n") else regex[0]
-        return regex, string
+    # Leading street-type words normalized to the abbreviation MRW expects
+    MRW_STREET_TYPES = {
+        "calle": "C/",
+        "carrer": "C/",
+        "avenida": "Avda.",
+        "avinguda": "Avda.",
+        "avda": "Avda.",
+        "plaza": "Pza.",
+        "plaça": "Pza.",
+        "pza": "Pza.",
+        "paseo": "Pº",
+        "passeig": "Pº",
+        "carretera": "Ctra.",
+        "ctra": "Ctra.",
+    }
+
+    # A standalone house number: not part of a floor/door pattern like
+    # "3º", "3ª" or "4-1", and not preceded by other digits or a dash.
+    MRW_NUMBER_RE = r"(?!(\d+[ºª]?-))(?!(\d+[ºª]))(?<![-\d])\d+"
+
+    def _mrw_find_number(self, street, allow_range=False):
+        number = re.search(self.MRW_NUMBER_RE, street) or re.search(
+            r"S\/N|s\/n", street
+        )
+        if not number and allow_range:
+            # "36-38" style range: MRW only accepts digits, send the first one
+            number = re.search(r"(?<![-\d])(\d+)-\d+", street)
+        return number
 
     def mrw_address(self, partner, international):
-        # Method to get parameters CodigoTipoVia. Via, Numero, Resto from odoo address.
-        # If street and number are in the first address line, and floor and door in the
-        # second one, it will always work properly.Otherwise, it could assign them wrong
+        # Method to get parameters CodigoTipoVia, Via, Numero, Resto from odoo
+        # address. The street is split at the house number: what comes before
+        # is the Via, the digits are the Numero (MRW rejects non-numeric
+        # characters there) and everything after (stair/floor/door, letter
+        # suffixes like "48a") goes to Resto together with street2.
 
-        street = partner.street.replace(",", "") if partner.street else ""
-        street2 = partner.street2.replace(",", "") if partner.street2 else ""
+        street = (partner.street or "").strip()
+        street2 = (partner.street2 or "").strip()
         if not street:
             raise UserError(_("Couldn't find partner %s street") % partner.name)
         if international:
             return {
-                "Via": street + street2,
+                "Via": " ".join(part for part in (street, street2) if part),
                 "CodigoPostal": partner.zip or "",
                 "Poblacion": partner.city or "",
                 "Estado": partner.state_id.name,
                 "CodigoPais": partner.country_id.code,
             }
-        number = re.search(
-            r"(?!(\d+[ºª]?-))(?!(\d+[ºª]))(?<![-\d])\d+", street
-        ) or re.search(r"S\/N|s\/n", street)
-        if not number:
-            if re.search(r"\d+-\d+", street):
-                raise UserError(
-                    _(
-                        "Solamente se permiten caracteres numéricos en el campo número"
-                        " de la dirección. Número: %s"
-                    )
-                    % (re.search(r"\d+-\d+", street)[0])
-                )
-            number2 = re.search(
-                r"(?!(\d+[ºª]?-))(?!(\d+[ºª]))(?<![-\d])\d+", street2
-            ) or re.search(r"S\/N|s\/n", street2)
-            if number2:
-                number2, street2 = self.remove_found_regex_from_string(number2, street2)
+        via = street
+        numero = ""
+        resto = street2
+        number = self._mrw_find_number(street, allow_range=True)
         if number:
-            number, street = self.remove_found_regex_from_string(number, street)
-            floor_door = re.search(r"(\d+[ºª]?[- ]?)(\d+[ºª]?)", street)
-            if floor_door:
-                floor_door, street = self.remove_found_regex_from_string(
-                    floor_door, street
+            numero = (
+                "0"
+                if number[0] in ("S/N", "s/n")
+                else re.match(r"\d+", number[0])[0]
+            )
+            via = street[: number.start()].strip(" ,")
+            after = street[number.end() :].strip(" ,")
+            if not via:
+                # American style ("548 Market street"): the number comes
+                # first and the street name after it
+                via = after
+                resto = street2
+            else:
+                resto = " ".join(part for part in (after, street2) if part)
+        else:
+            number2 = self._mrw_find_number(street2)
+            if number2:
+                numero = "0" if number2[0] in ("S/N", "s/n") else number2[0]
+                resto = " ".join(
+                    part
+                    for part in (
+                        street2[: number2.start()].strip(" ,"),
+                        street2[number2.end() :].strip(" ,"),
+                    )
+                    if part
                 )
-                street2 = floor_door + " " + street2
-        street_type = re.search(r"^[a-zA-Z]{1,4}[\/|\.]", street)
-        if street_type:
-            limit = street_type.span()[1]
-            street_type = street[:limit]
-            street = street[limit:]
+        street_type = ""
+        prefix = re.match(r"[a-zA-Z]{1,4}[\/\.]", via)
+        if prefix:
+            street_type = prefix[0]
+            via = via[prefix.end() :]
+        else:
+            word = re.match(r"([^\W\d_]+)\s+", via, re.UNICODE)
+            if word and word[1].lower() in self.MRW_STREET_TYPES:
+                street_type = self.MRW_STREET_TYPES[word[1].lower()]
+                via = via[word.end() :]
 
         return {
-            "CodigoTipoVia": street_type or "",
-            "Via": street,
-            "Numero": number or number2 or "",
-            "Resto": street2 or "",
+            "CodigoTipoVia": street_type,
+            "Via": via.strip(" ,"),
+            "Numero": numero,
+            "Resto": resto.strip(" ,"),
             "CodigoPostal": partner.zip or "",
             "Poblacion": partner.city or "",
         }
