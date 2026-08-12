@@ -50,6 +50,16 @@ MRW_INTERNATIONAL_SERVICES = [
     ("ECOMM", "ECOMMERCE"),
 ]
 
+# MRW "Estado" code -> the delivery_state field added by `delivery_state`.
+# Only the terminal codes are listed; every other code is a scan on the way,
+# so the default is "in_transit".
+MRW_TRACKING_STATES_MAP = {
+    "00": "customer_delivered",  # Entregado
+    "76": "customer_delivered",  # Retirado de MRW Point
+    "08": "incident",  # Devuelto al remitente
+    "99": "canceled_shipment",  # Envío cancelado
+}
+
 
 class DeliveryCarrier(models.Model):
     _inherit = "delivery.carrier"
@@ -560,8 +570,11 @@ class DeliveryCarrier(models.Model):
             )
         picking.tracking_state_history = "\n".join(tracking_lines)
         tracking = tracking_states.pop()
+        state_code = tracking.get("state_code")
         picking.tracking_state = "[{}] {}".format(
-            tracking.get("state_code"), tracking.get("description")
+            state_code, tracking.get("description")
         )
-        if tracking.get("state_code") == "00":
+        delivery_state = MRW_TRACKING_STATES_MAP.get(state_code, "in_transit")
+        picking.delivery_state = delivery_state
+        if delivery_state == "customer_delivered":
             picking.write({"date_delivered": tracking.get("delivery_date")})

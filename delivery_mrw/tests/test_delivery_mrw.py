@@ -175,3 +175,55 @@ class TestDeliveryMRW(BaseCommon):
         self.assertEqual(
             manifest_data[-1]["carrier_tracking_ref"], self.picking.carrier_tracking_ref
         )
+
+    @mock.patch("odoo.addons.delivery_mrw.models.mrw_request.Client")
+    def test_03_mrw_tracking_state(self, *args):
+        """The MRW state code drives delivery_state and date_delivered"""
+        delivered_at = datetime.datetime(2024, 5, 3, 11, 30)
+        cases = [
+            # (state code, description, delivery_state, sets date_delivered)
+            ("00", "Entregado", "customer_delivered", True),
+            ("76", "Retirado de MRW Point", "customer_delivered", True),
+            ("08", "Devuelto al remitente", "incident", False),
+            ("99", "Envío cancelado", "canceled_shipment", False),
+            ("79", "Paso por plataforma", "in_transit", False),
+            # unknown codes are just another scan on the way
+            ("42", "Whatever MRW invents next", "in_transit", False),
+        ]
+        self.picking.carrier_tracking_ref = "00615F428033"
+        for state_code, description, delivery_state, sets_date in cases:
+            self.picking.write({"delivery_state": False, "date_delivered": False})
+            tracking = {
+                "state_code": state_code,
+                "description": description,
+                "delivery_date": delivered_at,
+            }
+            with mock.patch.object(
+                type(self.carrier_mrw),
+                "_prepare_mrw_tracking",
+                return_value={},
+            ), mock.patch(
+                "odoo.addons.delivery_mrw.models.mrw_request."
+                "MRWRequest._get_tracking_states",
+                return_value={
+                    "MensajeSeguimiento": "Busqueda correcta por Número de Albarán."
+                },
+            ), mock.patch(
+                "odoo.addons.delivery_mrw.models.mrw_request."
+                "MRWRequest._process_mrw_tracking_response",
+                return_value=[tracking],
+            ):
+                self.carrier_mrw.mrw_tracking_state_update(self.picking)
+            self.assertEqual(
+                self.picking.delivery_state, delivery_state, msg=description
+            )
+            self.assertEqual(
+                self.picking.tracking_state,
+                f"[{state_code}] {description}",
+                msg=description,
+            )
+            self.assertEqual(
+                self.picking.date_delivered,
+                delivered_at if sets_date else False,
+                msg=description,
+            )
