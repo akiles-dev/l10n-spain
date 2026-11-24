@@ -62,6 +62,9 @@ class MRWRequest:
             response = service(request=request)
         except Fault as e:
             raise UserError(str(e)) from e
+        finally:
+            # Log even on fault, so failed requests can be debugged too
+            self.carrier._mrw_log_request(self)
         return response
 
     def _cancel_shipment(self, reference=False):
@@ -99,9 +102,14 @@ class MRWRequest:
         """Get just tracking states from MRW info for the given reference"""
         transport = ZeepTransport(timeout=10)
         zeep_client = Client(
-            wsdl=MRW_TRACKING_API_URL[self.api_env], transport=transport
+            wsdl=MRW_TRACKING_API_URL[self.api_env],
+            transport=transport,
+            plugins=[self.history],
         )
-        response = zeep_client.service.GetEnvios(**vals)
+        try:
+            response = zeep_client.service.GetEnvios(**vals)
+        finally:
+            self.carrier._mrw_log_request(self)
         return response
 
     def _process_mrw_tracking_response(self, response):

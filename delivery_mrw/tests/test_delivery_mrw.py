@@ -62,6 +62,78 @@ class TestDeliveryMRW(BaseCommon):
         cls.picking = cls.sale_order.picking_ids
         assert cls.product.qty_available == 100
 
+    def test_00_mrw_address(self):
+        """National address parsing: Via/Numero/Resto split"""
+        cases = [
+            # (street, street2, tipo, via, numero, resto)
+            ("C/Ferran Puig 48a", "", "C/", "Ferran Puig", "48", "a"),
+            (
+                "Calle Batalla de Almansa 1b puerta 2",
+                "",
+                "C/",
+                "Batalla de Almansa",
+                "1",
+                "b puerta 2",
+            ),
+            # number ranges: MRW only takes digits, send the first number
+            (
+                "Avda Carles Buïgas, 36-38",
+                "Escalera D, 4°1°",
+                "Avda.",
+                "Carles Buïgas",
+                "36",
+                "Escalera D, 4°1°",
+            ),
+            # American style: number first
+            ("548 Market street", "PMB 90375", "", "Market street", "548", "PMB 90375"),
+            # commas in floor/door must survive
+            ("VIA AUGUSTA 228 3,1", "", "", "VIA AUGUSTA", "228", "3,1"),
+            ("Calle de La Rua, 3", "4-1", "C/", "de La Rua", "3", "4-1"),
+            ("Plaza Mayor S/N", "", "Pza.", "Mayor", "0", ""),
+            ("Gran Via 21", "3º 2ª", "", "Gran Via", "21", "3º 2ª"),
+            # number in street2
+            ("Passeig de Gràcia", "92 àtic", "Pº", "de Gràcia", "92", "àtic"),
+            ("Avenida Espanya, 6C", "", "Avda.", "Espanya", "6", "C"),
+            # no number anywhere
+            ("Carrer sense numero", "", "C/", "sense numero", "", ""),
+        ]
+        for street, street2, tipo, via, numero, resto in cases:
+            partner = self.env["res.partner"].new(
+                {
+                    "name": "Test",
+                    "street": street,
+                    "street2": street2,
+                    "zip": "08014",
+                    "city": "Barcelona",
+                }
+            )
+            address = self.carrier_mrw.mrw_address(partner, False)
+            self.assertEqual(
+                (
+                    address["CodigoTipoVia"],
+                    address["Via"],
+                    address["Numero"],
+                    address["Resto"],
+                ),
+                (tipo, via, numero, resto),
+                f"failed for {street!r} + {street2!r}",
+            )
+
+    def test_00_mrw_address_international(self):
+        partner = self.env["res.partner"].new(
+            {
+                "name": "Test",
+                "street": "548 Market street",
+                "street2": "PMB 90375",
+                "zip": "94104",
+                "city": "San Francisco",
+                "country_id": self.env.ref("base.us").id,
+            }
+        )
+        address = self.carrier_mrw.mrw_address(partner, True)
+        self.assertEqual(address["Via"], "548 Market street PMB 90375")
+        self.assertEqual(address["CodigoPais"], "US")
+
     @mock.patch("odoo.addons.delivery_mrw.models.mrw_request.Client")
     @mock.patch(
         "odoo.addons.delivery_mrw.models.delivery_carrier.DeliveryCarrier.mrw_get_label",
